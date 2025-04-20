@@ -428,7 +428,7 @@ if __name__ == "__main__":
     
     # Initialize the agent
     agent = AudioProcessingAgent()
-    
+    username = input("Enter the username of the user you want refund summary of:")
     # Check if we're in test mode (single audio URL)
     test_audio_url = os.getenv("TEST_AUDIO_URL")
     test_request_id = os.getenv("TEST_REQUEST_ID")
