@@ -2,8 +2,9 @@ import time
 import random
 import google.generativeai as genai
 from Utils.prompt_helper import format_prompt
+from config import GEMINI_API_KEY
 
-genai.configure(api_key="AIzaSyCxXgWTduZ9FNw0hef7qIDlrG8I_5QDlPg")
+genai.configure(api_key=GEMINI_API_KEY)
 
 model = genai.GenerativeModel(model_name="models/gemini-1.5-pro-latest")
 
