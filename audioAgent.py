@@ -84,6 +84,7 @@ class AudioProcessingAgent:
     def __init__(self):
         self.processed_count = 0
         self.error_count = 0
+        self.skipped_count = 0
         
         # Check if API keys are available
         if not ELEVENLABS_API_KEY:
@@ -118,7 +119,6 @@ class AudioProcessingAgent:
                 self.gemini_models = ["gemini-pro", "gemini-1.5-pro", "gemini-1.5-flash"]
 
     def download_audio(self, audio_url):
-        """Download audio from URL to memory"""
         try:
             print(f"Downloading audio from {audio_url}...")
             response = requests.get(audio_url)
@@ -133,7 +133,6 @@ class AudioProcessingAgent:
             raise
 
     def transcribe_audio(self, audio_data):
-        """Transcribe audio using ElevenLabs Speech-to-Text"""
         try:
             print("Transcribing audio with ElevenLabs Speech-to-Text...")
             
@@ -169,18 +168,34 @@ class AudioProcessingAgent:
                 except Exception as urdu_error:
                     print(f"Urdu transcription failed: {urdu_error}")
                     
-                    # If Urdu fails, try with English
-                    print("Attempting transcription with English language code...")
-                    # Reset the BytesIO position to the beginning
-                    audio_data.seek(0)
-                    transcription = elevenlabs_client.speech_to_text.convert(
-                        file=audio_data,
-                        model_id="scribe_v1",
-                        tag_audio_events=True,
-                        language_code="eng",   # English language code
-                        diarize=True
-                    )
-                    print("English transcription successful")
+                    # If Urdu fails, try with Hindi (which might work better for some mixed content)
+                    try:
+                        print("Attempting transcription with Hindi language code...")
+                        # Reset the BytesIO position to the beginning
+                        audio_data.seek(0)
+                        transcription = elevenlabs_client.speech_to_text.convert(
+                            file=audio_data,
+                            model_id="scribe_v1",
+                            tag_audio_events=True,
+                            language_code="hin",   # Hindi language code
+                            diarize=True
+                        )
+                        print("Hindi transcription successful")
+                    except Exception as hindi_error:
+                        print(f"Hindi transcription failed: {hindi_error}")
+                        
+                        # If Hindi fails, try with English
+                        print("Attempting transcription with English language code...")
+                        # Reset the BytesIO position to the beginning
+                        audio_data.seek(0)
+                        transcription = elevenlabs_client.speech_to_text.convert(
+                            file=audio_data,
+                            model_id="scribe_v1",
+                            tag_audio_events=True,
+                            language_code="eng",   # English language code
+                            diarize=True
+                        )
+                        print("English transcription successful")
             
             # Extract the text from the transcription
             if hasattr(transcription, 'text'):
@@ -209,17 +224,11 @@ class AudioProcessingAgent:
             print(f"Error transcribing with ElevenLabs: {e}")
             
             # Provide troubleshooting information
-            print("\nTROUBLESHOOTING TIPS:")
-            print("1. Check that your ElevenLabs API key is valid")
-            print("2. Ensure you have sufficient credits in your ElevenLabs account")
-            print("3. Verify that the audio file is in a supported format (MP3, WAV, etc.)")
-            print("4. Check your internet connection")
             
             # Return error message as transcription
             return f"Transcription failed: {str(e)}"
 
     def summarize_text(self, text):
-        """Generate a summary using Google's Gemini AI"""
         try:
             # Configure the generation model
             generation_config = {
@@ -265,7 +274,6 @@ class AudioProcessingAgent:
             return self.simple_summarize(text)
     
     def simple_summarize(self, text):
-        """Simple fallback summarization method"""
         print("Using simple fallback summarization")
         # Take the first 150 characters as a simple summary
         simple_summary = text[:150] + "..." if len(text) > 150 else text
@@ -280,7 +288,6 @@ class AudioProcessingAgent:
         return simple_summary
 
     def update_refund_request(self, request_id, summary):
-        """Update the refund_requests table with the summary"""
         try:
             print(f"Updating database for request {request_id}...")
             result = supabase.table("refund_requests").update(
@@ -292,18 +299,46 @@ class AudioProcessingAgent:
             print(f"Error updating database: {e}")
             raise
 
-    def process_audio_requests(self):
-        """Process all refund requests with audio URLs"""
+    def check_already_processed(self, request_id):
         try:
-            # Get all refund requests with audio URLs 
-            print("Fetching refund requests with audio URLs...")
             response = supabase.table("refund_requests")\
+                .select("audio_summary")\
+                .eq("id", request_id)\
+                .execute()
+            
+            if response.data and len(response.data) > 0:
+                summary = response.data[0].get('audio_summary')
+                if summary and not summary.startswith("Error processing audio:"):
+                    return True  # Already has a valid summary
+            
+            return False  # Needs processing
+        except Exception as e:
+            print(f"Error checking if request {request_id} was processed: {e}")
+            return False  # Assume it needs processing if we can't check
+
+    def process_audio_requests(self, start_id=None, process_all=False):
+        try:
+            # Get all refund requests with audio URLs, ordered by ID
+            print("Fetching refund requests with audio URLs...")
+            query = supabase.table("refund_requests")\
                 .select("id, audio_url")\
                 .not_.is_("audio_url", "null")\
-                .execute()
+                .order("id")  # Order by ID to ensure we process in sequence
+            
+            # If start_id is provided, only process from that ID onwards
+            if start_id is not None:
+                query = query.gte("id", start_id)
+                
+            response = query.execute()
             
             refund_requests = response.data
             print(f"Found {len(refund_requests)} refund requests with audio URLs")
+            
+            # Print the range of IDs we're processing
+            if refund_requests:
+                min_id = min(request['id'] for request in refund_requests)
+                max_id = max(request['id'] for request in refund_requests)
+                print(f"Processing requests with IDs from {min_id} to {max_id}")
             
             for request in refund_requests:
                 request_id = request['id']
@@ -311,6 +346,13 @@ class AudioProcessingAgent:
                 
                 try:
                     print(f"\nProcessing refund request {request_id}")
+                    
+                    # Check if this request has already been processed
+                    if not process_all and self.check_already_processed(request_id):
+                        print(f"Request {request_id} already has a summary. Skipping.")
+                        self.skipped_count += 1
+                        continue
+                    
                     print(f"Audio URL: {audio_url}")
                     
                     # Download audio
@@ -338,17 +380,18 @@ class AudioProcessingAgent:
                     self.error_count += 1
                     continue
             
-            print(f"\nProcessing complete. Processed {self.processed_count} requests with {self.error_count} errors.")
+            print(f"\nProcessing complete. Processed: {self.processed_count}, Errors: {self.error_count}, Skipped: {self.skipped_count}")
             return {
                 "processed": self.processed_count,
-                "errors": self.error_count
+                "errors": self.error_count,
+                "skipped": self.skipped_count
             }
                 
         except Exception as e:
             print(f"Error fetching refund requests: {e}")
             raise
 
-    def process_single_audio(self, audio_url):
+    def process_single_audio(self, audio_url, request_id=None):
         """Process a single audio URL for testing purposes"""
         try:
             print(f"Processing single audio URL: {audio_url}")
@@ -366,6 +409,11 @@ class AudioProcessingAgent:
             print(f"Transcription: {transcription}")
             print(f"Summary: {summary}")
             
+            # Update database if request_id is provided
+            if request_id:
+                self.update_refund_request(request_id, summary)
+                print(f"Updated database for request {request_id}")
+            
             return {
                 "transcription": transcription,
                 "summary": summary
@@ -378,23 +426,44 @@ class AudioProcessingAgent:
 if __name__ == "__main__":
     print("Starting audio processing agent with ElevenLabs Speech-to-Text...")
     
+    # Initialize the agent
+    agent = AudioProcessingAgent()
+    
     # Check if we're in test mode (single audio URL)
     test_audio_url = os.getenv("TEST_AUDIO_URL")
+    test_request_id = os.getenv("TEST_REQUEST_ID")
+    
+    # Check if we should start from a specific ID
+    start_id = os.getenv("START_ID")
+    if start_id:
+        try:
+            start_id = int(start_id)
+            print(f"Starting processing from ID: {start_id}")
+        except ValueError:
+            print(f"Invalid START_ID: {start_id}. Must be an integer.")
+            start_id = None
+    
+    # Check if we should process all records, including those already processed
+    process_all = os.getenv("PROCESS_ALL", "false").lower() in ("true", "1", "yes")
+    if process_all:
+        print("Will process ALL records, including those already processed")
+    
     if test_audio_url:
         print(f"Test mode: Processing single audio URL: {test_audio_url}")
-        agent = AudioProcessingAgent()
-        result = agent.process_single_audio(test_audio_url)
+        if test_request_id:
+            try:
+                test_request_id = int(test_request_id)
+                print(f"Will update database for request ID: {test_request_id}")
+            except ValueError:
+                print(f"Invalid TEST_REQUEST_ID: {test_request_id}. Must be an integer.")
+                test_request_id = None
+        
+        result = agent.process_single_audio(test_audio_url, test_request_id)
     else:
         # Check database connection and process all requests
         if diagnose_database_connection():
-            # Initialize and run the agent
-            agent = AudioProcessingAgent()
-            result = agent.process_audio_requests()
+            # Run the agent
+            result = agent.process_audio_requests(start_id=start_id, process_all=process_all)
             print(f"Final result: {result}")
         else:
             print("Database connection failed!")
-    
-    print("\nNOTE: To use this script, you need valid API keys.")
-    print("Add them to your .env file as:")
-    print("ELEVENLABS_API_KEY=your_elevenlabs_api_key")
-    print("GEMINI_API_KEY=your_gemini_api_key")
