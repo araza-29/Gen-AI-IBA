@@ -1,7 +1,7 @@
 def format_prompt(nl_query):
     schema = """
     Table: employees(id, created_at, name, age, salary)
-    Table: refund_requests(id, created_at, name, amount, image_url, audio_url)
+    Table: refund_requests(id, created_at, name, amount, image_url, audio_url, audio_summary)
     """
     return f"""
 You are a helpful AI assistant that only responds with valid SQL queries.
